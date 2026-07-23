@@ -8,6 +8,7 @@ from pydantic import BaseModel, Field
 import chromadb
 from PIL import Image
 from typing import Literal
+import time
 
 # 1. Setup & Config
 load_dotenv()
@@ -22,12 +23,13 @@ def get_stylist_recommendations(base_item_summary: str):
     prompt = f"""
     The user is building an outfit around this base item: '{base_item_summary}'.
     Act as a high-end personal fashion stylist. 
-    Identify 2 complementary clothing categories needed to complete a cohesive outfit.
+    Create EXACTLY 2 completely distinct outfit combinations around this base item (e.g., one casual, one more elevated).
+    For each outfit, identify the complementary clothing categories needed to complete it.
     For each category, provide a detailed search description that can be used to query a vector database.
     """
     
     response = client.models.generate_content(
-        model='gemini-2.5-flash',
+        model='gemini-3.5-flash',
         contents=prompt,
         config=types.GenerateContentConfig(
             response_mime_type="application/json",
@@ -36,26 +38,22 @@ def get_stylist_recommendations(base_item_summary: str):
     )
     return response.text
 
-class ClothingItem(BaseModel):
-    # We replace 'str' with Literal to force a strict choice
-    category: Literal['top', 'bottom', 'shoes'] = Field(
-        description="Strictly categorize the item as 'top' (shirts, sweaters, jackets), 'bottom' (pants, shorts), or 'shoes'."
-    )
-    primary_color: str = Field(description="The dominant color.")
-    pattern: str = Field(description="e.g., solid, striped, floral, graphic print.")
-    style: str = Field(description="e.g., casual, formal, streetwear, athletic.")
-    season: str = Field(description="The best season: summer, winter, fall, spring, or all-season.")
-
 class OutfitQuery(BaseModel):
-    # Force the stylist to ONLY request one of our 3 macro-categories
     needed_category: Literal['top', 'bottom', 'shoes'] = Field(
         description="The category needed, strictly chosen from 'top', 'bottom', or 'shoes'."
     )
     search_prompt: str = Field(description="A descriptive query for vector search, e.g., 'casual light blue relaxed fit denim pants'.")
     styling_reasoning: str = Field(description="Brief explanation of why this complements the base item.")
 
+# --- NEW SCHEMA ---
+class OutfitOption(BaseModel):
+    outfit_name: str = Field(description="A catchy name for this look (e.g., 'Weekend Casual' or 'Elevated Evening').")
+    outfit_vibe: str = Field(description="A short sentence describing the overall aesthetic.")
+    items: list[OutfitQuery] # The items that make up THIS specific outfit
+
+# --- UPDATED SCHEMA ---
 class StylistPlan(BaseModel):
-    recommendations: list[OutfitQuery]
+    outfits: list[OutfitOption] # The Stylist now returns a list of Outfits!
 
 st.title("AI Digital Wardrobe Setup")
 
@@ -78,7 +76,7 @@ if st.button("Process & Add to Wardrobe") and uploaded_files:
         # 3. Call Gemini to get the Structured JSON
         with st.spinner("Extracting features with Gemini..."):
             response = client.models.generate_content(
-                model='gemini-2.5-flash',
+                model='gemini-3.5-flash',
                 contents=["Analyze this clothing item and extract the requested details.", img],
                 config=types.GenerateContentConfig(
                     response_mime_type="application/json",
@@ -100,6 +98,8 @@ if st.button("Process & Add to Wardrobe") and uploaded_files:
                 metadatas=[{"image_path": save_path, **metadata}], 
                 ids=[file.name] # We use the filename as a unique ID
             )
+        st.info("Throttling API to respect rate limits... waiting 4 seconds.")
+        time.sleep(4)
             
     st.success("All items successfully added to your Digital Wardrobe! 🚀")
 
@@ -121,21 +121,32 @@ else:
         col = cols[idx % 3] 
         
         with col:
-            # Display the image using the saved path
+            # Display your wardrobe image
             st.image(metadata['image_path'], use_container_width=True)
             st.caption(f"{metadata['category'].title()} - {metadata['primary_color'].title()}")
             
-            # 4. The Magic "Style Me" Button
-            # We use a unique key for each button so Streamlit knows which one was clicked
+            # --- THE INFERENCE BLOCK ---
+            # This code ONLY runs the exact second you click the button.
             if st.button(f"Style Me! 🪄", key=f"btn_{item_id}"):
                 
+                # 1. Save the image info to memory
                 st.session_state.selected_item = document
                 st.session_state.selected_image = metadata['image_path']
+                
+                # 2. Call the 2.5-flash API exactly ONCE
+                with st.spinner("Your AI Stylist is putting together a look..."):
+                    plan_json = get_stylist_recommendations(document)
+                    
+                    # 3. Save the expensive API response to memory!
+                    st.session_state.current_plan = json.loads(plan_json)
 
-# 5. Display the final Outfit Recommendation
-if 'selected_item' in st.session_state:
+# --- THE RENDER BLOCK ---
+# This sits completely outside the columns/buttons.
+# It reads for FREE from your local memory, never calling Google!
+# --- THE RENDER BLOCK ---
+if 'current_plan' in st.session_state:
     st.divider()
-    st.header("🎯 Your Curated Outfit")
+    st.header("🎯 Your Curated Outfits")
     
     col1, col2 = st.columns([1, 2])
     with col1:
@@ -143,26 +154,36 @@ if 'selected_item' in st.session_state:
         st.image(st.session_state.selected_image, width=200)
         
     with col2:
-        with st.spinner("Your AI Stylist is putting together a look..."):
-            # Call your function from Milestone 4!
-            plan_json = get_stylist_recommendations(st.session_state.selected_item)
-            plan_dict = json.loads(plan_json)
-            
-            st.write("### AI Recommendations:")
-            for rec in plan_dict['recommendations']:
-                st.write(f"**Need:** {rec['needed_category'].title()}")
-                st.write(f"*{rec['styling_reasoning']}*")
+        st.write("### AI Recommendations")
+        
+        # 1. Create a list of tab names from the AI's generated outfits
+        tab_names = [outfit['outfit_name'] for outfit in st.session_state.current_plan['outfits']]
+        
+        # 2. Generate the Streamlit Tabs
+        outfit_tabs = st.tabs(tab_names)
+        
+        # 3. Loop through the tabs and populate them
+        for idx, tab in enumerate(outfit_tabs):
+            with tab:
+                # Grab the specific outfit data for this tab
+                outfit_data = st.session_state.current_plan['outfits'][idx]
+                st.write(f"*{outfit_data['outfit_vibe']}*")
+                st.divider()
                 
-                # RUN YOUR VECTOR SEARCH HERE (Copy your logic from Milestone 4)
-                results = collection.query(
-                    query_texts=[rec['search_prompt']],
-                    n_results=1,
-                    where={"category": rec['needed_category']}
-                )
-                
-                # Display the recommended image!
-                if results['distances'][0]:
-                    rec_image_path = results['metadatas'][0][0]['image_path']
-                    st.image(rec_image_path, width=150)
-                else:
-                    st.warning(f"No {rec['needed_category']} found in your wardrobe.")
+                # Now loop through the items exactly like you did before!
+                for rec in outfit_data['items']:
+                    st.write(f"**Need:** {rec['needed_category'].title()}")
+                    st.write(f"*{rec['styling_reasoning']}*")
+                    
+                    # Local ChromaDB Vector Search
+                    results = collection.query(
+                        query_texts=[rec['search_prompt']],
+                        n_results=1,
+                        where={"category": rec['needed_category']}
+                    )
+                    
+                    if results['distances'][0]:
+                        rec_image_path = results['metadatas'][0][0]['image_path']
+                        st.image(rec_image_path, width=150)
+                    else:
+                        st.warning(f"No {rec['needed_category']} found in your wardrobe.")
