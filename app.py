@@ -19,21 +19,35 @@ chroma_client = chromadb.PersistentClient(path="./wardrobe_db")
 # Think of a collection as a table in a database
 collection = chroma_client.get_or_create_collection(name="my_wardrobe")
 
+class ClothingItem(BaseModel):
+    # 1. The Macro-Category (For strict ChromaDB filtering)
+    category: Literal['top', 'bottom', 'shoes'] = Field(
+        description="Strictly categorize the item as 'top', 'bottom', or 'shoes' for database filtering."
+    )
+    # 2. The Micro-Category (For semantic vector search)
+    item_type: str = Field(
+        description="The specific garment type (e.g., 't-shirt', 'sweater', 'button-down', 'jeans', 'chinos', 'loafers')."
+    )
+    primary_color: str = Field(description="The dominant color.")
+    pattern: str = Field(description="e.g., solid, striped, floral, graphic print.")
+    style: str = Field(description="e.g., casual, formal, streetwear, athletic.")
+    season: str = Field(description="The best season: summer, winter, fall, spring, or all-season.")
+
 def get_stylist_recommendations(base_item_summary: str):
     prompt = f"""
     The user is building an outfit around this base item: '{base_item_summary}'.
     Act as a high-end personal fashion stylist. 
     Create EXACTLY 2 completely distinct outfit combinations around this base item (e.g., one casual, one more elevated).
     For each outfit, identify the complementary clothing categories needed to complete it.
-    For each category, provide a detailed search description that can be used to query a vector database.
+    Use simple, primary color names in your search prompts (e.g., use 'white', 'beige', or 'brown' instead of 'camel', 'ecru', or 'taupe').
     """
     
     response = client.models.generate_content(
-        model='gemini-3.5-flash',
+        model='gemini-2.5-flash',
         contents=prompt,
         config=types.GenerateContentConfig(
             response_mime_type="application/json",
-            response_schema=StylistPlan,
+            response_schema=StylistPlan, # Now this works because StylistPlan is defined above!
         )
     )
     return response.text
@@ -42,18 +56,20 @@ class OutfitQuery(BaseModel):
     needed_category: Literal['top', 'bottom', 'shoes'] = Field(
         description="The category needed, strictly chosen from 'top', 'bottom', or 'shoes'."
     )
-    search_prompt: str = Field(description="A descriptive query for vector search, e.g., 'casual light blue relaxed fit denim pants'.")
+    search_prompt: str = Field(
+        # Notice we changed [category] to [item_type] in the instructions here!
+        description="Strict format required: 'A [style] [pattern] [color] [item_type] suitable for [season]'. Example: 'A casual solid cream t-shirt suitable for summer'."
+    )
     styling_reasoning: str = Field(description="Brief explanation of why this complements the base item.")
 
 # --- NEW SCHEMA ---
 class OutfitOption(BaseModel):
     outfit_name: str = Field(description="A catchy name for this look (e.g., 'Weekend Casual' or 'Elevated Evening').")
     outfit_vibe: str = Field(description="A short sentence describing the overall aesthetic.")
-    items: list[OutfitQuery] # The items that make up THIS specific outfit
+    items: list[OutfitQuery] 
 
-# --- UPDATED SCHEMA ---
 class StylistPlan(BaseModel):
-    outfits: list[OutfitOption] # The Stylist now returns a list of Outfits!
+    outfits: list[OutfitOption]
 
 st.title("AI Digital Wardrobe Setup")
 
@@ -88,7 +104,8 @@ if st.button("Process & Add to Wardrobe") and uploaded_files:
             metadata = json.loads(response.text)
             
             # Create the Embeddable String (This is what ChromaDB will search against!)
-            summary_string = f"A {metadata['style']} {metadata['pattern']} {metadata['primary_color']} {metadata['category']} suitable for {metadata['season']}"
+            # Create the Embeddable String using the new 'item_type'
+            summary_string = f"A {metadata['style']} {metadata['pattern']} {metadata['primary_color']} {metadata['item_type']} suitable for {metadata['season']}"
             st.write(f"**Extracted AI Summary:** {summary_string}")
             
             # 4. Insert into the Vector DB
