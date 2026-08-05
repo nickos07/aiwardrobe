@@ -4,3 +4,6 @@ pydantic
 chromadb
 pillow
 python-dotenv
+
+fastapi
+starlette==0.39.2
