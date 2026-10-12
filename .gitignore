@@ -16,8 +16,11 @@ wardrobe_db/
 
 # 5. User Uploaded Images (Privacy / Repo Bloat)
 wardrobe_images/
+api_wardrobe_db/
 
 # 6. Streamlit & OS System Files
 .streamlit/
 .DS_Store
 Thumbs.db
+node_modules/
+.expo/
